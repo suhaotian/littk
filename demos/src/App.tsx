@@ -33,7 +33,7 @@ const LittkDemo = () => {
         className="sticky top-0 flex items-center justify-between px-6 py-4 z-2 bg-white"
         data-scroll-hide="header">
         <h1 className="text-xl font-black tracking-tight text-indigo-600">
-          littk.js
+          littkk.js
         </h1>
         <button
           onClick={playClick}
