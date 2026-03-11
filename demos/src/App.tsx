@@ -31,7 +31,7 @@ const LittkDemo = () => {
 
       <div
         className="sticky top-0 flex items-center justify-between px-6 py-4 z-2 bg-white"
-        data-scroll-hide="header">
+        data-scroll-top>
         <h1 className="text-xl font-black tracking-tight text-indigo-600">
           littkk.js
         </h1>
@@ -45,8 +45,7 @@ const LittkDemo = () => {
       {/* TABS: Sticky below header */}
       <nav
         className="sticky top-[72px] z-3 bg-white flex px-4 overflow-x-auto no-scrollbar border-t border-slate-100"
-        data-scroll-hide="header"
-        data-delay="0">
+        data-scroll-top={0}>
         {["Explore", "Trending", "Saved", "Settings"].map((tab, i) => (
           <button
             key={tab}
@@ -90,14 +89,17 @@ const LittkDemo = () => {
       <button
         onClick={playClick}
         className={`fixed right-6 bottom-24 z-40 w-14 h-14 bg-indigo-600 text-white rounded-2xl shadow-lg shadow-indigo-300 
-        flex items-center justify-center text-2xl transition-all active:scale-90 hover:bg-indigo-700`} data-scroll-hide="right"
-        data-delay="0">
+        flex items-center justify-center text-2xl transition-all active:scale-90 hover:bg-indigo-700`}
+        data-scroll-bottom="0"
+        data-scroll-right="0"
+        data-delay="100">
         ＋
       </button>
 
       {/* BOTTOM BAR: Selector .littk-bottom */}
       <footer
-        className={`fixed bottom-0 w-full z-50 transition-transform duration-300 ease-in-out bg-white border-t border-slate-200 pb-safe`} data-scroll-hide="footer">
+        className={`fixed bottom-0 w-full z-50 transition-transform duration-300 ease-in-out bg-white border-t border-slate-200 pb-safe`}
+        data-scroll-bottom>
         <div className="flex justify-around items-center h-16">
           {["Home", "Search", "Profile"].map((item) => (
             <button

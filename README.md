@@ -1,8 +1,8 @@
 # littkk
 
-Hides and shows elements on scroll — works on multiple elements, in any direction, with no classes, no config files, and no framework adapters.
+Hide and show elements on scroll — works on multiple elements, in any direction, with no classes, no config files, and no framework adapters.
 
-Just add a `data-scroll-hide` attribute and call `littkk()`!
+Just add a `data-scroll-top` (or `bottom` / `left` / `right`) attribute and call `littkk()`!
 
 ## Online Demos
 
@@ -10,40 +10,75 @@ https://suhaotian.github.io/littkk
 
 ## Attributes
 
-Add `data-scroll-hide` to any `position: fixed | sticky | absolute` element.
+There are two modes, determined by whether the attribute has a value.
 
-| Attribute          | Values                           | Default                  |
-| ------------------ | -------------------------------- | ------------------------ |
-| `data-scroll-hide` | `header` `footer` `left` `right` | —                        |
-| `data-offset`      | px                               | auto from computed style |
-| `data-duration`    | ms                               | `300`                    |
-| `data-delay`       | ms                               | `0`                      |
-| `data-always-show` | flag                             | —                        |
+### Hide mode — no value
 
-`data-offset` overrides the auto-computed slide distance. Use it when `getComputedStyle().top/bottom/left/right` is unreliable — e.g. `inset` shorthand or elements with a pre-existing `transform`.
+Slides the element out of the viewport on scroll down, back in on scroll up. Element must be `position: fixed | sticky | absolute`.
+
+```html
+<header data-scroll-top></header>
+<footer data-scroll-bottom></footer>
+<nav data-scroll-left></nav>
+<aside data-scroll-right></aside>
+```
+
+| Direction | Attribute            | Behavior                     |
+| --------- | -------------------- | ---------------------------- |
+| Up        | `data-scroll-top`    | slides up out of viewport    |
+| Down      | `data-scroll-bottom` | slides down out of viewport  |
+| Left      | `data-scroll-left`   | slides left out of viewport  |
+| Right     | `data-scroll-right`  | slides right out of viewport |
+
+### Distance mode — CSS value
+
+The element is never hidden. Instead its CSS edge property (`top` / `bottom` / `left` / `right`) transitions to the given value on scroll down, and reverts on scroll up.
+
+Bare numbers are treated as `px`. Any CSS unit is accepted.
+
+```html
+<!-- top → 0px when scrolled down, reverts when scrolled up -->
+<div data-scroll-top="0"></div>
+
+<!-- top → 1rem -->
+<div data-scroll-top="1rem"></div>
+
+<!-- multiple axes on the same element -->
+<div data-scroll-bottom="0" data-scroll-right="0"></div>
+```
+
+### Shared attributes
+
+| Attribute       | Values | Default                  | Applies to     |
+| --------------- | ------ | ------------------------ | -------------- |
+| `data-duration` | ms     | `300`                    | both modes     |
+| `data-delay`    | ms     | `0`                      | both modes     |
+| `data-offset`   | px     | auto from computed style | hide mode only |
+
+`data-delay` — ms to wait after scroll stops before executing. Scrolling again resets the timer. Showing is always immediate.
+
+`data-offset` — overrides the auto-computed slide distance. Useful when `getComputedStyle().top/bottom/left/right` is unreliable, e.g. with `inset` shorthand or a pre-existing `transform`.
 
 ## Options
 
 ```ts
 littkk({
-  scrollTarget: "#my-div", // window (default), HTMLElement, or selector
-  threshold: 5, // min px delta before triggering
-  showAtTop: true, // force-show when scroll position is 0
+  scrollTarget: "#my-div", // window (default), HTMLElement, or CSS selector
+  threshold: 5, // min px delta before triggering. Default: 5
+  showAtTop: true, // force-show all elements when scroll position reaches 0. Default: true
 });
 ```
 
 ## HTML
 
 ```html
-<header data-scroll-hide="header" style="position: fixed; top: 0; width: 100%;">
+<header data-scroll-top style="position: fixed; top: 0; width: 100%;">
   ...
 </header>
 
-<nav data-scroll-hide="left" style="position: fixed; left: 0;">...</nav>
+<nav data-scroll-left style="position: fixed; left: 0;">...</nav>
 
-<footer
-  data-scroll-hide="footer"
-  style="position: fixed; bottom: 0; width: 100%;">
+<footer data-scroll-bottom style="position: fixed; bottom: 0; width: 100%;">
   ...
 </footer>
 
@@ -61,7 +96,7 @@ import { littkk, LittkkOptions } from "littkk";
 
 function useLittkk(options?: LittkkOptions) {
   useEffect(() => {
-    const ctrl = littk(options);
+    const ctrl = littkk(options);
     return () => ctrl.destroy();
   }, []);
 }
@@ -74,11 +109,15 @@ export default function App() {
   return (
     <>
       <header
-        data-scroll-hide="header"
+        data-scroll-top
         style={{ position: "fixed", top: 0, width: "100%" }}>
         ...
       </header>
-      <main>...</main>
+
+      {/* Shifts top to 0 when header hides, reverts when header shows */}
+      <main data-scroll-top="0" style={{ position: "fixed", top: 64 }}>
+        ...
+      </main>
     </>
   );
 }
@@ -98,7 +137,7 @@ export default function Feed() {
 
   return (
     <div ref={containerRef} style={{ height: "100vh", overflowY: "auto" }}>
-      <header data-scroll-hide="header" style={{ position: "sticky", top: 0 }}>
+      <header data-scroll-top style={{ position: "sticky", top: 0 }}>
         ...
       </header>
     </div>
@@ -110,7 +149,7 @@ export default function Feed() {
 
 ```vue
 <script setup>
-import { onMounted, onUnmounted } from "vue";
+import { onUnmounted } from "vue";
 import { littkk } from "littkk";
 
 const ctrl = littkk();
@@ -118,9 +157,7 @@ onUnmounted(() => ctrl.destroy());
 </script>
 
 <template>
-  <header
-    data-scroll-hide="header"
-    style="position: fixed; top: 0; width: 100%;">
+  <header data-scroll-top style="position: fixed; top: 0; width: 100%;">
     ...
   </header>
   <main>...</main>
@@ -145,9 +182,7 @@ onUnmounted(() => ctrl?.destroy());
 
 <template>
   <div ref="containerRef" style="height: 100vh; overflow-y: auto;">
-    <header data-scroll-hide="header" style="position: sticky; top: 0;">
-      ...
-    </header>
+    <header data-scroll-top style="position: sticky; top: 0;">...</header>
   </div>
 </template>
 ```

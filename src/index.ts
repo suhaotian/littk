@@ -1,24 +1,33 @@
 /**
- *
- * Hides/shows elements marked with [data-scroll-hide] based on scroll direction.
+ * Hides/shows or repositions elements based on scroll direction.
  * SSR-safe: all DOM access is deferred to init() / refresh().
  *
- * Element attributes:
- *   data-scroll-hide="header" | "footer" | "left" | "right"
- *     header → slides up    (translateY, uses top + offsetHeight)
- *     footer → slides down  (translateY, uses bottom + offsetHeight)
- *     left   → slides left  (translateX, uses left + offsetWidth)
- *     right  → slides right (translateX, uses right + offsetWidth)
- *     Element must be position: fixed | sticky | absolute.
+ * Attributes:
+ *   data-scroll-top | data-scroll-bottom | data-scroll-left | data-scroll-right
+ *     Declares the role and mode of the element. Only the first matched attr is used.
+ *
+ *     Hide mode   — attr has no value or empty string:
+ *       data-scroll-top          → slides element up out of viewport (translateY)
+ *       data-scroll-bottom       → slides element down out of viewport (translateY)
+ *       data-scroll-left         → slides element left out of viewport (translateX)
+ *       data-scroll-right        → slides element right out of viewport (translateX)
+ *       Element must be position: fixed | sticky | absolute.
+ *
+ *     Distance mode — attr has a CSS value:
+ *       data-scroll-top="0"      → sets top to 0px when hidden, reverts when shown
+ *       data-scroll-top="1rem"   → sets top to 1rem when hidden, reverts when shown
+ *       Bare numbers get "px" appended. Any CSS unit is accepted.
+ *       Element is never hidden — only repositioned.
  *
  *   data-offset="px"
- *     Override the auto-computed hide distance (positive number).
+ *     Override the auto-computed hide distance (positive number). Hide mode only.
  *
- *   data-duration="300"   transition animation duration in ms. Default: 300.
- *   data-delay="0"        ms to wait after scroll stops before hiding. Default: 0.
- *                         Hiding is debounced — scrolling again resets the timer.
- *                         Showing is always immediate.
- *   data-always-show      never hidden regardless of scroll direction.
+ *   data-duration="300"
+ *     Transition duration in ms. Default: 300.
+ *
+ *   data-delay="0"
+ *     ms to wait after scroll stops before executing. Applies to both modes. Default: 0.
+ *     Scrolling again resets the timer. Showing is always immediate.
  *
  * Usage:
  *   const ctrl = littkk()
@@ -48,32 +57,53 @@ export interface LittkkController {
 export function littkk(options: LittkkOptions = {}): LittkkController {
   const { scrollTarget, threshold = 5, showAtTop = true } = options;
 
-  type Role = "header" | "footer" | "left" | "right";
-  type Item = {
+  type ScrollAttr =
+    | "data-scroll-top"
+    | "data-scroll-bottom"
+    | "data-scroll-left"
+    | "data-scroll-right";
+  type EdgeProp = "top" | "bottom" | "left" | "right";
+
+  type HideItem = {
+    kind: "hide";
     el: HTMLElement;
-    role: Role;
     duration: number;
     delay: number;
-    alwaysShow: boolean;
     hideTransform: string;
   };
 
-  // Shared string constants to reduce bundle size.
+  type DistanceItem = {
+    kind: "distance";
+    el: HTMLElement;
+    edgeProp: EdgeProp;
+    duration: number;
+    delay: number;
+    targetValue: string;
+    originalValue: string;
+  };
+
+  type Item = HideItem | DistanceItem;
+
   const TRANSFORM = "transform";
   const TRANSITION = "transition";
   const NONE = "none";
-  const DATA_SCROLL_HIDE = "data-scroll-hide";
 
-  /** role → [cssProp, axis, edgeProp, sizeKey, sign] */
-  const ROLE_CONFIG: Record<
-    Role,
-    [string, string, string, "offsetHeight" | "offsetWidth", 1 | -1]
-  > = {
-    header: ["translateY", "Y", "top", "offsetHeight", -1],
-    footer: ["translateY", "Y", "bottom", "offsetHeight", 1],
-    left: ["translateX", "X", "left", "offsetWidth", -1],
-    right: ["translateX", "X", "right", "offsetWidth", 1],
-  };
+  /**
+   * Ordered list — first match wins when multiple data-scroll-* attrs are present.
+   * [scrollAttr, translateFn, edgeProp, sizeProp, sign]
+   */
+  const SCROLL_ATTRS: [
+    ScrollAttr,
+    string,
+    EdgeProp,
+    "offsetHeight" | "offsetWidth",
+    1 | -1
+  ][] = [
+    ["data-scroll-top", "translateY", "top", "offsetHeight", -1],
+    ["data-scroll-bottom", "translateY", "bottom", "offsetHeight", 1],
+    ["data-scroll-left", "translateX", "left", "offsetWidth", -1],
+    ["data-scroll-right", "translateX", "right", "offsetWidth", 1],
+  ];
 
   let managed: Item[] = [];
   let eventTarget: Window | HTMLElement | null = null;
@@ -83,9 +113,25 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
   let ticking = false;
   let destroyed = false;
 
-  const hideTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  /** Keyed by element to avoid stale-index bugs. */
+  const hideTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 
-  function setTransform(
+  /**
+   * Persists the original edge value across re-scans so refresh() while hidden
+   * doesn't capture the already-mutated targetValue as the original.
+   */
+  /** Cache of original edge values per element per prop, persisted across re-scans. */
+  const originalEdgeValues = new WeakMap<HTMLElement, Record<string, string>>();
+
+  /**
+   * Normalise a data-scroll-* value to a valid CSS value.
+   * Bare numbers get "px" appended; values with units are used as-is.
+   */
+  function normaliseCSSValue(raw: string): string {
+    return String(parseFloat(raw)) === raw.trim() ? `${raw}px` : raw;
+  }
+
+  function setHideTransform(
     el: HTMLElement,
     value: string,
     animated: boolean,
@@ -95,38 +141,87 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     el.style[TRANSFORM] = value;
   }
 
+  function setDistanceEdge(item: DistanceItem, toTarget: boolean) {
+    item.el.style[TRANSITION] = `all ${item.duration}ms ease`;
+    item.el.style[item.edgeProp] = toTarget
+      ? item.targetValue
+      : item.originalValue;
+  }
+
   /**
    * Compute CSS transform to fully slide an element out of the viewport.
    * +2px guards against box-shadow bleed. Falls back to ±110% if the
    * computed edge property is unparseable (e.g. "auto").
    */
-  function computeHideTransform(el: HTMLElement, role: Role): string {
+  function computeHideTransform(
+    el: HTMLElement,
+    fn: string,
+    edgeProp: EdgeProp,
+    sizeProp: "offsetHeight" | "offsetWidth",
+    sign: 1 | -1
+  ): string {
     const override = parseFloat(el.getAttribute("data-offset") ?? "");
-    const [fn, , edgeProp, sizeKey, sign] = ROLE_CONFIG[role];
     if (!isNaN(override)) return `${fn}(${sign * override}px)`;
     const v = parseFloat(
       getComputedStyle(el)[edgeProp as keyof CSSStyleDeclaration] as string
     );
     const dist = isNaN(v)
       ? "110%"
-      : `${Math.abs(sign) * (v + el[sizeKey] + 2)}px`;
+      : `${Math.abs(sign) * (v + el[sizeProp] + 2)}px`;
     return `${fn}(${sign < 0 ? "-" : ""}${dist})`;
   }
 
   function scanElements() {
+    const selector = SCROLL_ATTRS.map(([attr]) => `[${attr}]`).join(",");
     managed = Array.from(
-      document.querySelectorAll<HTMLElement>(`[${DATA_SCROLL_HIDE}]`)
-    ).flatMap((el) => {
-      const role = el.getAttribute(DATA_SCROLL_HIDE) as Role;
-      if (!(role in ROLE_CONFIG)) return [];
+      document.querySelectorAll<HTMLElement>(selector)
+    ).flatMap((el): Item[] => {
+      const duration = parseInt(el.getAttribute("data-duration") ?? "300", 10);
+      const delay = parseInt(el.getAttribute("data-delay") ?? "0", 10);
+
+      // Collect all distance-mode attrs — multiple edge props are independent (e.g. bottom + right).
+      const distanceEdges: DistanceItem[] = SCROLL_ATTRS.flatMap(
+        ([attr, , edgeProp]) => {
+          if (!el.hasAttribute(attr)) return [];
+          const raw = el.getAttribute(attr) ?? "";
+          if (raw.trim() === "" || raw === "true") return [];
+          const cacheKey = `${edgeProp}`;
+          if (!originalEdgeValues.has(el)) originalEdgeValues.set(el, {});
+          const cache = originalEdgeValues.get(el)!;
+          if (!(cacheKey in cache)) {
+            cache[cacheKey] =
+              el.style[edgeProp] ||
+              (getComputedStyle(el)[
+                edgeProp as keyof CSSStyleDeclaration
+              ] as string);
+          }
+          return [
+            {
+              kind: "distance",
+              el,
+              edgeProp,
+              duration,
+              delay,
+              targetValue: normaliseCSSValue(raw),
+              originalValue: cache[cacheKey] as string,
+            },
+          ];
+        }
+      );
+
+      if (distanceEdges.length > 0) return distanceEdges;
+
+      // Hide mode — first matching attr wins (only one transform axis allowed).
+      const hideMatch = SCROLL_ATTRS.find(([attr]) => el.hasAttribute(attr));
+      if (!hideMatch) return [];
+      const [, fn, edgeProp, sizeProp, sign] = hideMatch;
       return [
         {
+          kind: "hide",
           el,
-          role,
-          duration: parseInt(el.getAttribute("data-duration") ?? "300", 10),
-          delay: parseInt(el.getAttribute("data-delay") ?? "0", 10),
-          alwaysShow: el.hasAttribute("data-always-show"),
-          hideTransform: computeHideTransform(el, role),
+          duration,
+          delay,
+          hideTransform: computeHideTransform(el, fn, edgeProp, sizeProp, sign),
         },
       ];
     });
@@ -137,28 +232,42 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     hideTimers.forEach(clearTimeout);
     hideTimers.clear();
     for (const item of managed) {
-      if (!item.alwaysShow) setTransform(item.el, "", animated, item.duration);
+      if (item.kind === "hide") {
+        setHideTransform(item.el, "", animated, item.duration);
+      } else {
+        setDistanceEdge(item, false);
+      }
     }
   }
 
-  /** Hiding is debounced per element — scrolling again cancels pending timers. */
+  /** Both hide and distance items are debounced per element via data-delay. */
   function scheduleHide() {
     currentlyVisible = false;
     hideTimers.forEach(clearTimeout);
     hideTimers.clear();
-    managed.forEach((item, i) => {
-      if (item.alwaysShow) return;
-      const apply = () => {
-        hideTimers.delete(i);
-        if (!destroyed)
-          setTransform(item.el, item.hideTransform, true, item.duration);
-      };
+    for (const item of managed) {
+      const apply =
+        item.kind === "hide"
+          ? () => {
+              hideTimers.delete(item.el);
+              if (!destroyed)
+                setHideTransform(
+                  item.el,
+                  item.hideTransform,
+                  true,
+                  item.duration
+                );
+            }
+          : () => {
+              hideTimers.delete(item.el);
+              if (!destroyed) setDistanceEdge(item, true);
+            };
       if (item.delay <= 0) {
         apply();
-        return;
+        continue;
       }
-      hideTimers.set(i, setTimeout(apply, item.delay));
-    });
+      hideTimers.set(item.el, setTimeout(apply, item.delay));
+    }
   }
 
   function onScroll() {
@@ -170,13 +279,14 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
       const current = getScrollTop();
       const delta = current - lastScrollTop;
       lastScrollTop = current;
-      if (showAtTop && current <= 0) {
-        if (!currentlyVisible) showAll();
-        return;
-      }
       if (Math.abs(delta) < threshold) return;
-      if (delta < 0 && !currentlyVisible) showAll();
-      else if (delta > 0 && currentlyVisible) scheduleHide();
+      if (delta < 0) {
+        // Scrolling up — show elements. If showAtTop and reached the very top, always show.
+        if (!currentlyVisible) showAll();
+        else if (showAtTop && current <= 0) showAll();
+      } else if (delta > 0 && currentlyVisible) {
+        scheduleHide();
+      }
     });
   }
 
@@ -209,8 +319,11 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
       hideTimers.forEach(clearTimeout);
       hideTimers.clear();
       for (const item of managed) {
-        if (!item.alwaysShow)
-          setTransform(item.el, item.hideTransform, false, 0);
+        if (item.kind === "hide") {
+          setHideTransform(item.el, item.hideTransform, false, 0);
+        } else {
+          setDistanceEdge(item, true);
+        }
       }
     }
   }
@@ -222,8 +335,16 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     hideTimers.clear();
     if (eventTarget) eventTarget.removeEventListener("scroll", onScroll);
     for (const item of managed) {
-      item.el.style[TRANSITION] = "";
-      item.el.style[TRANSFORM] = "";
+      if (item.kind === "hide") {
+        item.el.style[TRANSITION] = "";
+        item.el.style[TRANSFORM] = "";
+      } else {
+        item.el.style[TRANSITION] = "";
+        item.el.style[item.edgeProp] = item.originalValue;
+        // Clear per-prop cache so re-init after destroy captures fresh values.
+        const cache = originalEdgeValues.get(item.el);
+        if (cache) delete cache[item.edgeProp];
+      }
     }
     managed = [];
     eventTarget = null;
