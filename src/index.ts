@@ -45,6 +45,8 @@ export interface LittkkOptions {
   threshold?: number;
   /** Force-show all elements when scrolled to the very top. Default: true */
   showAtTop?: boolean;
+  /** default `enable: true` */
+  enable?: boolean;
 }
 
 export interface LittkkController {
@@ -52,10 +54,19 @@ export interface LittkkController {
   refresh: () => void;
   /** Remove scroll listener and reset all element styles. */
   destroy: () => void;
+  /** disable */
+  disable: () => void;
+  /** enable */
+  enable: () => void;
 }
 
 export function littkk(options: LittkkOptions = {}): LittkkController {
-  const { scrollTarget, threshold = 5, showAtTop = true } = options;
+  const {
+    scrollTarget,
+    threshold = 5,
+    showAtTop = true,
+    enable: _enable = true,
+  } = options;
 
   type ScrollAttr =
     | "data-scroll-top"
@@ -105,6 +116,7 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     ["data-scroll-right", "translateX", "right", "offsetWidth", 1],
   ];
 
+  let enable = _enable;
   let managed: Item[] = [];
   let eventTarget: Window | HTMLElement | null = null;
   let getScrollTop: () => number = () => 0;
@@ -271,7 +283,7 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
   }
 
   function onScroll() {
-    if (destroyed || ticking) return;
+    if (destroyed || ticking || !enable) return;
     ticking = true;
     requestAnimationFrame(() => {
       ticking = false;
@@ -351,5 +363,14 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
   }
 
   init();
-  return { refresh, destroy };
+  return {
+    refresh,
+    destroy,
+    enable() {
+      enable = true;
+    },
+    disable() {
+      enable = false;
+    },
+  };
 }

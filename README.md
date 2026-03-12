@@ -69,6 +69,21 @@ littkk({
 });
 ```
 
+### Return
+
+```ts
+export interface LittkkController {
+  /** Re-scan DOM and sync new elements to current scroll state. */
+  refresh: () => void;
+  /** disable */
+  disable: () => void;
+  /** enable */
+  enable: () => void;
+  /** Remove scroll listener and reset all element styles. */
+  destroy: () => void;
+}
+```
+
 ## HTML
 
 ```html

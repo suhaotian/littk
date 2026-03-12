@@ -1,5 +1,10 @@
 # CHANGELOG
 
+
+## v2.1.0
+
+Add `.enable()` and `.disable()` methods
+
 ## v2.0.0
 
 `data-scroll-header` -> `data-scroll-top`
