@@ -132,6 +132,14 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
   const hideTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 
   /**
+   * Monotonic counter incremented on every showAll() call.
+   * scheduleHide() captures the value at scheduling time; the applied
+   * callback bails out if the counter has advanced — meaning a show
+   * happened after the hide was queued (bounce protection).
+   */
+  let showGeneration = 0;
+
+  /**
    * Persists the original edge value across re-scans so refresh() while hidden
    * doesn't capture the already-mutated targetValue as the original.
    */
@@ -243,6 +251,8 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
   }
 
   function showAll(animated = true) {
+    // FIX: advance generation so any in-flight scheduleHide callbacks become stale.
+    showGeneration++;
     currentlyVisible = true;
     hideTimers.forEach(clearTimeout);
     hideTimers.clear();
@@ -260,12 +270,17 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     currentlyVisible = false;
     hideTimers.forEach(clearTimeout);
     hideTimers.clear();
+
+    // FIX: snapshot generation at scheduling time; callbacks bail if stale.
+    const gen = showGeneration;
+
     for (const item of managed) {
       const apply =
         item.kind === Kind.hide
           ? () => {
               hideTimers.delete(item.el);
-              if (!destroyed)
+              // FIX: bail if showAll() was called after this hide was scheduled.
+              if (!destroyed && gen === showGeneration)
                 setHideTransform(
                   item.el,
                   item.hideTransform,
@@ -275,7 +290,9 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
             }
           : () => {
               hideTimers.delete(item.el);
-              if (!destroyed) setDistanceEdge(item, true);
+              // FIX: bail if showAll() was called after this hide was scheduled.
+              if (!destroyed && gen === showGeneration)
+                setDistanceEdge(item, true);
             };
       if (item.delay <= 0) {
         apply();
@@ -295,11 +312,21 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
       const delta = current - lastScrollTop;
       lastScrollTop = current;
       if (Math.abs(delta) < threshold) return;
-      if (delta < 0) {
-        // Scrolling up — show elements. If showAtTop and reached the very top, always show.
+
+      if (showAtTop && current <= 0) {
+        // FIX: always show at top regardless of direction or current state,
+        // and always cancel any pending hide timers.
         if (!currentlyVisible) showAll();
-        else if (showAtTop && current <= 0) showAll();
+        return;
+      }
+
+      if (delta < 0) {
+        // Scrolling up — show.
+        // FIX: was calling showAll() unconditionally even when already visible,
+        // causing unnecessary generation bumps. Only act on state change.
+        if (!currentlyVisible) showAll();
       } else if (delta > 0 && currentlyVisible) {
+        // Scrolling down — hide.
         scheduleHide();
       }
     });

@@ -1,6 +1,6 @@
 {
   "name": "littkk",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "A more powerful and flexible headroom library that hides site headers or footers when scrolling down and reveals them again when scrolling up.",
   "repository": "suhaotian/littkk",
   "bugs": "https://github.com/suhaotian/littkk/issues",

@@ -1,11 +1,14 @@
 # CHANGELOG
 
+## v2.3.0
+
+Fix scroll bounce trigger hide issues.
+
 ## v2.2.0
 
 **Breaking Change:**
 
 Remove `.enable()` and `.disable()` methods and replace with `.setEnable(enable: boolean)`
-
 
 ## v2.1.0
 
