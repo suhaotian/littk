@@ -2,7 +2,7 @@
 
 ## v2.3.0
 
-Fix scroll bounce trigger hide issues.
+Fix scroll bouncing issue that triggers unintended hiding.
 
 ## v2.2.0
 
