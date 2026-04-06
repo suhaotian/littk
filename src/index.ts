@@ -29,6 +29,13 @@
  *     ms to wait after scroll stops before executing. Applies to both modes. Default: 0.
  *     Scrolling again resets the timer. Showing is always immediate.
  *
+ *   data-trigger="0.67"
+ *     Fraction of the element's size (height for top/bottom, width for left/right)
+ *     that must be scrolled past the scroll position at which the downward scroll began
+ *     before hiding triggers. Range: 0 to infinity (values > 1 = more than the element size).
+ *     Default: 0.67 (2/3 of element size). Per-element override of the global triggerRatio.
+ *     Only applies to hide mode; distance-mode items always trigger immediately.
+ *
  * Usage:
  *   const ctrl = littkk()
  *   ctrl.refresh()   // re-scan DOM after lazy-loaded elements mount
@@ -45,8 +52,16 @@ export interface LittkkOptions {
   threshold?: number;
   /** Force-show all elements when scrolled to the very top. Default: true */
   showAtTop?: boolean;
-  /** default `enable: true` */
+  /** Default: true */
   enable?: boolean;
+  /**
+   * Fraction of the element's relevant dimension (height for top/bottom,
+   * width for left/right) that must be scrolled past the hide-start position
+   * before the element actually hides. Default: 0.67 (2/3).
+   * Per-element data-trigger attribute overrides this value.
+   * Only applies to hide-mode elements.
+   */
+  triggerRatio?: number;
 }
 
 export interface LittkkController {
@@ -54,7 +69,7 @@ export interface LittkkController {
   refresh: () => void;
   /** Remove scroll listener and reset all element styles. */
   destroy: () => void;
-  /** Set enable or disable */
+  /** Enable or disable scroll handling without removing the listener. */
   setEnable: (enable: boolean) => void;
 }
 
@@ -64,6 +79,7 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     threshold = 5,
     showAtTop = true,
     enable: _enable = true,
+    triggerRatio = 0.67,
   } = options;
 
   type ScrollAttr =
@@ -83,7 +99,17 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     el: HTMLElement;
     duration: number;
     delay: number;
+    /** Resolved per-element trigger ratio (fraction of element size). */
+    triggerRatio: number;
+    /** Size dimension used to compute trigger distance (px). */
+    sizeProp: "offsetHeight" | "offsetWidth";
     hideTransform: string;
+    /**
+     * Whether this item has already been triggered in the current downward run.
+     * Prevents repeated rescheduling (and timer resets) on every scroll frame
+     * after the threshold is first crossed. Reset to false in showAll().
+     */
+    triggered: boolean;
   };
 
   type DistanceItem = {
@@ -94,6 +120,15 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     delay: number;
     targetValue: string;
     originalValue: string;
+    /** Same as HideItem.triggered — prevents repeated timer resets. */
+    triggered: boolean;
+    /**
+     * Trigger ratio for this distance item — mirrors HideItem.triggerRatio so
+     * distance-mode elements move in sync with their paired hide-mode element.
+     */
+    triggerRatio: number;
+    /** Size dimension used to compute trigger distance (px). */
+    sizeProp: "offsetHeight" | "offsetWidth";
   };
 
   type Item = HideItem | DistanceItem;
@@ -102,6 +137,7 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
   const TRANSITION = "transition";
   const NONE = "none";
   const PREFIX = `data-scroll-`;
+
   /**
    * Ordered list — first match wins when multiple data-scroll-* attrs are present.
    * [scrollAttr, translateFn, edgeProp, sizeProp, sign]
@@ -123,26 +159,29 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
   let managed: Item[] = [];
   let eventTarget: Window | HTMLElement | null = null;
   let getScrollTop: () => number = () => 0;
-  let lastScrollTop = 0;
+  let prevScrollTop = 0;
   let currentlyVisible = true;
   let ticking = false;
   let destroyed = false;
+
+  /**
+   * Scroll position where the most recent downward scroll run began.
+   * Set to the previous scroll position on the first downward frame.
+   * Reset to null on upward scroll or showAll().
+   */
+  let downScrollOrigin: number | null = null;
 
   /** Keyed by element to avoid stale-index bugs. */
   const hideTimers = new Map<HTMLElement, ReturnType<typeof setTimeout>>();
 
   /**
    * Monotonic counter incremented on every showAll() call.
-   * scheduleHide() captures the value at scheduling time; the applied
-   * callback bails out if the counter has advanced — meaning a show
-   * happened after the hide was queued (bounce protection).
+   * Callbacks scheduled by triggerHide() capture this at scheduling time
+   * and bail if the counter has advanced (bounce protection: prevents stale
+   * hide callbacks firing after a show).
    */
   let showGeneration = 0;
 
-  /**
-   * Persists the original edge value across re-scans so refresh() while hidden
-   * doesn't capture the already-mutated targetValue as the original.
-   */
   /** Cache of original edge values per element per prop, persisted across re-scans. */
   const originalEdgeValues = new Map<HTMLElement, Record<string, string>>();
 
@@ -173,7 +212,7 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
 
   /**
    * Compute CSS transform to fully slide an element out of the viewport.
-   * +2px guards against box-shadow bleed. Falls back to ±110% if the
+   * +2px guards against box-shadow bleed. Falls back to 110% if the
    * computed edge property is unparseable (e.g. "auto").
    */
   function computeHideTransform(
@@ -194,6 +233,14 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     return `${fn}(${sign < 0 ? "-" : ""}${dist})`;
   }
 
+  /**
+   * Returns the px distance that must be scrolled in a single continuous
+   * downward run before this item (hide or distance) triggers.
+   */
+  function resolveTriggerDistance(item: HideItem | DistanceItem): number {
+    return item.triggerRatio * item.el[item.sizeProp];
+  }
+
   function scanElements() {
     const selector = SCROLL_ATTRS.map(([attr]) => `[${attr}]`).join(",");
     managed = Array.from(
@@ -202,9 +249,9 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
       const duration = parseInt(el.getAttribute("data-duration") ?? "300", 10);
       const delay = parseInt(el.getAttribute("data-delay") ?? "0", 10);
 
-      // Collect all distance-mode attrs — multiple edge props are independent (e.g. bottom + right).
+      // Collect all distance-mode attrs — multiple edge props are independent.
       const distanceEdges: DistanceItem[] = SCROLL_ATTRS.flatMap(
-        ([attr, , edgeProp]) => {
+        ([attr, , edgeProp, sizeProp]) => {
           if (!el.hasAttribute(attr)) return [];
           const raw = el.getAttribute(attr) ?? "";
           if (raw.trim() === "" || raw === "true") return [];
@@ -218,15 +265,26 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
                 edgeProp as keyof CSSStyleDeclaration
               ] as string);
           }
+          // Per-element triggerRatio from data-trigger, falls back to global option.
+          const rawTrigger = el.getAttribute("data-trigger");
+          const resolvedTriggerRatio =
+            rawTrigger !== null && rawTrigger.trim() !== ""
+              ? parseFloat(rawTrigger)
+              : triggerRatio;
           return [
             {
               kind: Kind.distance,
               el,
               edgeProp,
+              sizeProp,
               duration,
               delay,
               targetValue: normaliseCSSValue(raw),
               originalValue: cache[cacheKey] as string,
+              triggered: false,
+              triggerRatio: isNaN(resolvedTriggerRatio)
+                ? triggerRatio
+                : resolvedTriggerRatio,
             },
           ];
         }
@@ -238,25 +296,40 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
       const hideMatch = SCROLL_ATTRS.find(([attr]) => el.hasAttribute(attr));
       if (!hideMatch) return [];
       const [, fn, edgeProp, sizeProp, sign] = hideMatch;
+
+      // Per-element triggerRatio from data-trigger, falls back to global option.
+      const rawTrigger = el.getAttribute("data-trigger");
+      const resolvedTriggerRatio =
+        rawTrigger !== null && rawTrigger.trim() !== ""
+          ? parseFloat(rawTrigger)
+          : triggerRatio;
+
       return [
         {
           kind: Kind.hide,
           el,
           duration,
           delay,
+          triggerRatio: isNaN(resolvedTriggerRatio)
+            ? triggerRatio
+            : resolvedTriggerRatio,
+          sizeProp,
           hideTransform: computeHideTransform(el, fn, edgeProp, sizeProp, sign),
+          triggered: false,
         },
       ];
     });
   }
 
+  /** Show all managed items and reset all per-run state. */
   function showAll(animated = true) {
-    // FIX: advance generation so any in-flight scheduleHide callbacks become stale.
     showGeneration++;
     currentlyVisible = true;
+    downScrollOrigin = null;
     hideTimers.forEach(clearTimeout);
     hideTimers.clear();
     for (const item of managed) {
+      item.triggered = false;
       if (item.kind === Kind.hide) {
         setHideTransform(item.el, "", animated, item.duration);
       } else {
@@ -265,40 +338,54 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     }
   }
 
-  /** Both hide and distance items are debounced per element via data-delay. */
-  function scheduleHide() {
-    currentlyVisible = false;
-    hideTimers.forEach(clearTimeout);
-    hideTimers.clear();
+  /**
+   * Schedule or immediately apply the hide for one item.
+   * item.triggered must be false before calling — callers must guard this.
+   * The gen snapshot prevents stale callbacks from firing after a showAll().
+   */
+  function triggerHide(item: Item, gen: number) {
+    item.triggered = true;
 
-    // FIX: snapshot generation at scheduling time; callbacks bail if stale.
-    const gen = showGeneration;
+    const apply =
+      item.kind === Kind.hide
+        ? () => {
+            hideTimers.delete(item.el);
+            if (!destroyed && gen === showGeneration)
+              setHideTransform(
+                item.el,
+                item.hideTransform,
+                true,
+                item.duration
+              );
+          }
+        : () => {
+            hideTimers.delete(item.el);
+            if (!destroyed && gen === showGeneration)
+              setDistanceEdge(item, true);
+          };
 
-    for (const item of managed) {
-      const apply =
-        item.kind === Kind.hide
-          ? () => {
-              hideTimers.delete(item.el);
-              // FIX: bail if showAll() was called after this hide was scheduled.
-              if (!destroyed && gen === showGeneration)
-                setHideTransform(
-                  item.el,
-                  item.hideTransform,
-                  true,
-                  item.duration
-                );
-            }
-          : () => {
-              hideTimers.delete(item.el);
-              // FIX: bail if showAll() was called after this hide was scheduled.
-              if (!destroyed && gen === showGeneration)
-                setDistanceEdge(item, true);
-            };
-      if (item.delay <= 0) {
-        apply();
-        continue;
-      }
+    if (item.delay <= 0) {
+      apply();
+    } else {
       hideTimers.set(item.el, setTimeout(apply, item.delay));
+    }
+  }
+
+  /**
+   * Called on each downward scroll frame with total px scrolled in the
+   * current continuous downward run.
+   *
+   * Each item is evaluated once per run — item.triggered gates repeat calls.
+   * currentlyVisible is only set false when at least one item actually fires,
+   * keeping it accurate even while items are still below their threshold.
+   */
+  function evaluateHide(scrolledInRun: number) {
+    const gen = showGeneration;
+    for (const item of managed) {
+      if (item.triggered) continue;
+      if (scrolledInRun < resolveTriggerDistance(item)) continue;
+      currentlyVisible = false;
+      triggerHide(item, gen);
     }
   }
 
@@ -308,26 +395,27 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     requestAnimationFrame(() => {
       ticking = false;
       if (destroyed) return;
+
       const current = getScrollTop();
-      const delta = current - lastScrollTop;
-      lastScrollTop = current;
+      const prev = prevScrollTop;
+      const delta = current - prev;
+      prevScrollTop = current;
+
       if (Math.abs(delta) < threshold) return;
 
       if (showAtTop && current <= 0) {
-        // FIX: always show at top regardless of direction or current state,
-        // and always cancel any pending hide timers.
         if (!currentlyVisible) showAll();
         return;
       }
 
       if (delta < 0) {
-        // Scrolling up — show.
-        // FIX: was calling showAll() unconditionally even when already visible,
-        // causing unnecessary generation bumps. Only act on state change.
+        // Scrolling up — show immediately, reset downward run.
+        downScrollOrigin = null;
         if (!currentlyVisible) showAll();
-      } else if (delta > 0 && currentlyVisible) {
-        // Scrolling down — hide.
-        scheduleHide();
+      } else {
+        // Scrolling down — record the start of this run on first downward frame.
+        if (downScrollOrigin === null) downScrollOrigin = prev;
+        evaluateHide(current - downScrollOrigin);
       }
     });
   }
@@ -347,7 +435,7 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
     }
     if (!eventTarget) return;
     scanElements();
-    lastScrollTop = getScrollTop();
+    prevScrollTop = getScrollTop();
     eventTarget.addEventListener("scroll", onScroll, { passive: true });
   }
 
@@ -360,6 +448,8 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
       hideTimers.forEach(clearTimeout);
       hideTimers.clear();
       for (const item of managed) {
+        // Mark as triggered so evaluateHide won't re-fire on next scroll frame.
+        item.triggered = true;
         if (item.kind === Kind.hide) {
           setHideTransform(item.el, item.hideTransform, false, 0);
         } else {
@@ -382,7 +472,6 @@ export function littkk(options: LittkkOptions = {}): LittkkController {
       } else {
         item.el.style[TRANSITION] = "";
         item.el.style[item.edgeProp] = item.originalValue;
-        // Clear per-prop cache so re-init after destroy captures fresh values.
         const cache = originalEdgeValues.get(item.el);
         if (cache) delete cache[item.edgeProp];
       }

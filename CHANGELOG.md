@@ -1,5 +1,10 @@
 # CHANGELOG
 
+
+## v2.4.0
+
+Add data-trigger="*", default is 0.67
+
 ## v2.3.0
 
 Fix scroll bouncing issue that triggers unintended hiding.
